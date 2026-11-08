@@ -1,0 +1,126 @@
+---
+# ---------------- Install MongoDB from the official repo ----------------
+- name: Create apt keyrings dir
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+- name: Add MongoDB GPG key
+  ansible.builtin.get_url:
+    url: "https://www.mongodb.org/static/pgp/server-{{ mongodb_version }}.asc"
+    dest: "/etc/apt/keyrings/mongodb-server-{{ mongodb_version }}.asc"
+    mode: "0644"
+
+- name: Add MongoDB apt repository
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [arch=amd64 signed-by=/etc/apt/keyrings/mongodb-server-{{ mongodb_version }}.asc]
+      https://repo.mongodb.org/apt/ubuntu {{ ansible_distribution_release }}/mongodb-org/{{ mongodb_version }} multiverse
+    filename: "mongodb-org-{{ mongodb_version }}"
+    state: present
+
+- name: Install MongoDB
+  ansible.builtin.apt:
+    name: mongodb-org
+    state: present
+    update_cache: true
+
+# ---------------- Configure: bind to private IP + require auth ----------------
+- name: Deploy mongod.conf (auth enabled, bound to localhost + private IP)
+  ansible.builtin.template:
+    src: mongod.conf.j2
+    dest: /etc/mongod.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart mongod
+
+- name: Start and enable mongod
+  ansible.builtin.service:
+    name: mongod
+    state: started
+    enabled: true
+
+- name: Apply config changes now
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for MongoDB to listen
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ mongo_port }}"
+    timeout: 60
+
+# ---------------- Users ----------------
+# Auth is on from the start. MongoDB's "localhost exception" lets us create the
+# FIRST user from localhost; after that every action needs credentials.
+# Passwords are passed through environment variables, never on the command line.
+- name: Check whether the admin user already works
+  ansible.builtin.command:
+    argv:
+      - mongosh
+      - --quiet
+      - --eval
+      - "db.getSiblingDB('admin').auth(process.env.ADMIN_USER, process.env.ADMIN_PASS)"
+  environment:
+    ADMIN_USER: "{{ mongo_admin_user }}"
+    ADMIN_PASS: "{{ mongo_admin_password }}"
+  register: admin_check
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Create admin user (localhost exception, first run only)
+  ansible.builtin.command:
+    argv:
+      - mongosh
+      - --quiet
+      - --eval
+      - >-
+        db.getSiblingDB('admin').createUser({
+          user: process.env.ADMIN_USER, pwd: process.env.ADMIN_PASS,
+          roles: [ { role: 'root', db: 'admin' } ] })
+  environment:
+    ADMIN_USER: "{{ mongo_admin_user }}"
+    ADMIN_PASS: "{{ mongo_admin_password }}"
+  when: admin_check.rc != 0
+  changed_when: true
+  no_log: true
+
+- name: Create / update application database user
+  ansible.builtin.command:
+    argv:
+      - mongosh
+      - --quiet
+      - --eval
+      - >-
+        db.getSiblingDB('admin').auth(process.env.ADMIN_USER, process.env.ADMIN_PASS);
+        const appdb = db.getSiblingDB(process.env.APP_DB);
+        if (appdb.getUser(process.env.APP_USER)) {
+          appdb.updateUser(process.env.APP_USER, { pwd: process.env.APP_PASS });
+          print('EXISTS');
+        } else {
+          appdb.createUser({ user: process.env.APP_USER, pwd: process.env.APP_PASS,
+                             roles: [ { role: 'readWrite', db: process.env.APP_DB } ] });
+          print('CREATED');
+        }
+  environment:
+    ADMIN_USER: "{{ mongo_admin_user }}"
+    ADMIN_PASS: "{{ mongo_admin_password }}"
+    APP_DB: "{{ mongo_app_db }}"
+    APP_USER: "{{ mongo_app_user }}"
+    APP_PASS: "{{ mongo_app_password }}"
+  register: app_user
+  changed_when: "'CREATED' in app_user.stdout"
+  no_log: true
+
+- name: Verify anonymous access is rejected
+  ansible.builtin.command:
+    argv: [mongosh, --quiet, --eval, "db.getSiblingDB('admin').runCommand({listDatabases: 1}).ok"]
+  register: anon_check
+  changed_when: false
+  failed_when: false
+
+- name: Show auth status
+  ansible.builtin.debug:
+    msg: "Anonymous listDatabases blocked: {{ anon_check.rc != 0 or 'Unauthorized' in (anon_check.stdout + anon_check.stderr) }}"

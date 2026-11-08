@@ -1,0 +1,16 @@
+---
+- name: Validate and restart sshd
+  ansible.builtin.command: sshd -t
+  changed_when: true
+  notify: Restart sshd
+
+- name: Restart sshd
+  ansible.builtin.service:
+    name: ssh
+    state: restarted
+
+- name: Restart fail2ban
+  ansible.builtin.service:
+    name: fail2ban
+    state: restarted
+    enabled: true

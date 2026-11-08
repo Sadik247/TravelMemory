@@ -1,0 +1,32 @@
+---
+# Full deployment: ansible-playbook site.yml --ask-vault-pass
+
+- name: Baseline + security hardening on all servers
+  hosts: all
+  become: true
+  gather_facts: false
+  pre_tasks:
+    - name: Wait until the instance accepts SSH (first boot can take a minute)
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    - name: Wait for cloud-init to finish (it holds the apt lock on first boot)
+      ansible.builtin.command: cloud-init status --wait
+      changed_when: false
+
+    - name: Gather facts
+      ansible.builtin.setup:
+  roles:
+    - common
+
+- name: Install, configure and secure MongoDB (private subnet)
+  hosts: db
+  become: true
+  roles:
+    - mongodb
+
+- name: Node.js, Nginx, deploy TravelMemory backend + frontend (public subnet)
+  hosts: web
+  become: true
+  roles:
+    - webserver

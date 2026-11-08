@@ -1,0 +1,38 @@
+---
+# ---------- App ----------
+app_repo_url: "https://github.com/Sadik247/TravelMemory.git"
+app_repo_version: "main"
+app_user: "travelapp"
+app_dir: "/opt/travelmemory"
+backend_port: 3001
+web_root: "/var/www/travelmemory"
+nodejs_major: "20"
+
+# React is built with this URL baked in. Nginx forwards /api/* to Express on :3001.
+frontend_backend_url: "http://{{ web_public_ip }}/api"
+# Express only accepts browser calls from this origin (CORS)
+cors_origin: "http://{{ web_public_ip }}"
+
+# ---------- MongoDB ----------
+mongodb_version: "7.0"
+mongo_port: 27017
+mongo_admin_user: "mongoadmin"
+mongo_app_db: "travelmemory"
+mongo_app_user: "travelapp"
+
+# Secrets come from group_vars/all/vault.yml (encrypt it with ansible-vault)
+mongo_admin_password: "{{ vault_mongo_admin_password }}"
+mongo_app_password: "{{ vault_mongo_app_password }}"
+
+# Database the backend uses:
+#   use_atlas: false -> MongoDB on the private EC2 (what the assignment asks for)
+#   use_atlas: true  -> your MongoDB Atlas cluster (vault_atlas_uri)
+use_atlas: false
+
+mongo_uri_selfhosted: >-
+  mongodb://{{ mongo_app_user }}:{{ mongo_app_password | urlencode }}@{{ db_private_ip }}:{{ mongo_port }}/{{ mongo_app_db }}?authSource={{ mongo_app_db }}
+
+mongo_uri: "{{ vault_atlas_uri if (use_atlas | bool) else mongo_uri_selfhosted }}"
+
+# ---------- Hardening ----------
+ssh_allowed_users: ["ubuntu"]

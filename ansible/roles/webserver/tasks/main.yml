@@ -1,0 +1,226 @@
+---
+# ---------------- Swap (React production build needs >1 GB RAM) ----------------
+- name: Check for swap file
+  ansible.builtin.stat:
+    path: /swapfile
+  register: swap
+
+- name: Create 2 GB swap file
+  ansible.builtin.shell: |
+    fallocate -l 2G /swapfile
+    chmod 600 /swapfile
+    mkswap /swapfile
+    swapon /swapfile
+  when: not swap.stat.exists
+  changed_when: true
+
+- name: Persist swap in fstab
+  ansible.posix.mount:
+    src: /swapfile
+    path: none
+    fstype: swap
+    opts: sw
+    state: present
+
+# ---------------- Node.js + NPM (NodeSource) and Nginx ----------------
+- name: Create apt keyrings dir
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+- name: Add NodeSource GPG key
+  ansible.builtin.get_url:
+    url: https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
+    dest: /etc/apt/keyrings/nodesource.asc
+    mode: "0644"
+
+- name: Add NodeSource repository
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by=/etc/apt/keyrings/nodesource.asc] https://deb.nodesource.com/node_{{ nodejs_major }}.x nodistro main"
+    filename: nodesource
+    state: present
+
+- name: Install Node.js (includes npm) and Nginx
+  ansible.builtin.apt:
+    name: [nodejs, nginx]
+    state: present
+    update_cache: true
+
+- name: Record Node/NPM versions
+  ansible.builtin.command: "{{ item }}"
+  loop: ["node -v", "npm -v"]
+  register: versions
+  changed_when: false
+
+- name: Show versions
+  ansible.builtin.debug:
+    msg: "{{ versions.results | map(attribute='stdout') | list }}"
+
+# ---------------- App user + code ----------------
+- name: Create unprivileged system user for the app
+  ansible.builtin.user:
+    name: "{{ app_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: "/var/lib/{{ app_user }}"
+    create_home: true
+
+- name: Create app directory
+  ansible.builtin.file:
+    path: "{{ app_dir }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_user }}"
+    mode: "0750"
+
+- name: Clone TravelMemory repository
+  ansible.builtin.git:
+    repo: "{{ app_repo_url }}"
+    dest: "{{ app_dir }}"
+    version: "{{ app_repo_version }}"
+    force: true
+  become: true
+  become_user: "{{ app_user }}"
+  register: repo
+
+# ---------------- Backend (Express) ----------------
+- name: Write backend .env (Mongo connection string + port)
+  ansible.builtin.template:
+    src: backend.env.j2
+    dest: "{{ app_dir }}/backend/.env"
+    owner: "{{ app_user }}"
+    group: "{{ app_user }}"
+    mode: "0600"
+  no_log: true
+  notify: Restart backend
+
+- name: Install backend dependencies
+  community.general.npm:
+    path: "{{ app_dir }}/backend"
+  become: true
+  become_user: "{{ app_user }}"
+  environment:
+    HOME: "/var/lib/{{ app_user }}"
+  notify: Restart backend
+
+- name: Install systemd unit for the backend
+  ansible.builtin.template:
+    src: travelmemory-backend.service.j2
+    dest: /etc/systemd/system/travelmemory-backend.service
+    mode: "0644"
+  notify: Restart backend
+
+- name: Enable and start backend
+  ansible.builtin.systemd:
+    name: travelmemory-backend
+    state: started
+    enabled: true
+    daemon_reload: true
+
+# ---------------- Frontend (React) ----------------
+- name: Write frontend .env (backend URL baked into the build)
+  ansible.builtin.template:
+    src: frontend.env.j2
+    dest: "{{ app_dir }}/frontend/.env"
+    owner: "{{ app_user }}"
+    group: "{{ app_user }}"
+    mode: "0644"
+  register: fe_env
+
+- name: Install frontend dependencies
+  community.general.npm:
+    path: "{{ app_dir }}/frontend"
+  become: true
+  become_user: "{{ app_user }}"
+  environment:
+    HOME: "/var/lib/{{ app_user }}"
+
+- name: Check for existing build
+  ansible.builtin.stat:
+    path: "{{ app_dir }}/frontend/build/index.html"
+  register: fe_build
+
+- name: Build React frontend (only when code or config changed)
+  ansible.builtin.command: npm run build
+  args:
+    chdir: "{{ app_dir }}/frontend"
+  become: true
+  become_user: "{{ app_user }}"
+  environment:
+    HOME: "/var/lib/{{ app_user }}"
+    CI: "false"
+    NODE_OPTIONS: "--max-old-space-size=1536"
+  when: repo.changed or fe_env.changed or not fe_build.stat.exists
+  register: build
+  changed_when: true
+
+- name: Publish build to the Nginx web root
+  ansible.builtin.command: "rsync -a --delete {{ app_dir }}/frontend/build/ {{ web_root }}/"
+  when: build.changed or not fe_build.stat.exists
+  changed_when: true
+
+- name: Web root ownership
+  ansible.builtin.file:
+    path: "{{ web_root }}"
+    state: directory
+    owner: www-data
+    group: www-data
+    recurse: true
+
+# ---------------- Nginx: static React + /api reverse proxy ----------------
+- name: Deploy Nginx site
+  ansible.builtin.template:
+    src: nginx-travelmemory.conf.j2
+    dest: /etc/nginx/sites-available/travelmemory
+    mode: "0644"
+  notify: Reload nginx
+
+- name: Enable site
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/travelmemory
+    dest: /etc/nginx/sites-enabled/travelmemory
+    state: link
+  notify: Reload nginx
+
+- name: Remove default site
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: Reload nginx
+
+- name: Hide Nginx version
+  ansible.builtin.lineinfile:
+    path: /etc/nginx/nginx.conf
+    regexp: '^\s*#?\s*server_tokens'
+    line: "        server_tokens off;"
+    insertafter: 'http \{'
+  notify: Reload nginx
+
+- name: Apply pending restarts/reloads
+  ansible.builtin.meta: flush_handlers
+
+# ---------------- Smoke tests ----------------
+- name: Backend health - Express up AND connected to MongoDB on the private server
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ backend_port }}/health"
+    return_content: true
+    status_code: 200
+  register: be_check
+  retries: 10
+  delay: 6
+  until: be_check.status == 200 and be_check.json.db == 'connected'
+
+- name: Backend reachable through Nginx at /api
+  ansible.builtin.uri:
+    url: "http://127.0.0.1/api/trip"
+    status_code: 200
+
+- name: Frontend served by Nginx
+  ansible.builtin.uri:
+    url: "http://127.0.0.1/"
+    status_code: 200
+
+- name: Done
+  ansible.builtin.debug:
+    msg: "TravelMemory is live at http://{{ web_public_ip }}"

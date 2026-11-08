@@ -1,0 +1,12 @@
+---
+# 1. cp vault.yml.example vault.yml
+# 2. put strong passwords below
+# 3. ansible-vault encrypt group_vars/all/vault.yml
+# vault.yml is git-ignored; never commit it unencrypted.
+# Tip: use letters, digits and - _ only (avoid / @ : in Mongo passwords).
+vault_mongo_admin_password: "ChangeMe-Admin-StrongPass1"
+vault_mongo_app_password: "ChangeMe-App-StrongPass2"
+
+# Only used when use_atlas: true in main.yml.
+# Put the database name (travelmemory) after the final slash.
+vault_atlas_uri: "mongodb+srv://sadiksyed247_db_user:<db_password>@cluster0.uepgba2.mongodb.net/travelmemory?retryWrites=true&w=majority&appName=Cluster0"

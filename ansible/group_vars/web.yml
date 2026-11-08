@@ -1,0 +1,5 @@
+---
+# The Security Group already limits SSH to your IP; UFW is a second layer.
+ufw_ssh_from: "any"
+ufw_extra_rules:
+  - { port: "80", proto: "tcp", from: "any", comment: "HTTP - Nginx" }

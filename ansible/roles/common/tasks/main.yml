@@ -1,0 +1,92 @@
+---
+- name: Update apt cache and upgrade packages
+  ansible.builtin.apt:
+    update_cache: true
+    upgrade: safe
+    cache_valid_time: 3600
+
+- name: Install baseline packages
+  ansible.builtin.apt:
+    name:
+      - ufw
+      - fail2ban
+      - unattended-upgrades
+      - git
+      - curl
+      - gnupg
+      - ca-certificates
+      - rsync
+      - acl   # lets Ansible "become" the unprivileged app user safely
+    state: present
+
+# ---------------- SSH hardening ----------------
+# Ubuntu reads /etc/ssh/sshd_config.d/*.conf in order and the FIRST value wins,
+# so "00-" makes these settings take priority.
+- name: Harden SSH daemon
+  ansible.builtin.template:
+    src: sshd-hardening.conf.j2
+    dest: /etc/ssh/sshd_config.d/00-hardening.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Validate and restart sshd
+
+- name: Lock the root account password
+  ansible.builtin.user:
+    name: root
+    password_lock: true
+
+# ---------------- Brute-force protection ----------------
+- name: Configure fail2ban for SSH
+  ansible.builtin.copy:
+    dest: /etc/fail2ban/jail.local
+    mode: "0644"
+    content: |
+      [sshd]
+      enabled  = true
+      port     = ssh
+      maxretry = 5
+      findtime = 10m
+      bantime  = 1h
+  notify: Restart fail2ban
+
+- name: Enable automatic security updates
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    mode: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
+# ---------------- Host firewall (UFW) ----------------
+# SSH is allowed BEFORE the firewall is enabled so we never lock ourselves out.
+- name: UFW - allow SSH
+  community.general.ufw:
+    rule: allow
+    port: "22"
+    proto: tcp
+    from_ip: "{{ ufw_ssh_from | default('any') }}"
+    comment: "SSH"
+
+- name: UFW - role specific rules
+  community.general.ufw:
+    rule: allow
+    port: "{{ item.port }}"
+    proto: "{{ item.proto }}"
+    from_ip: "{{ item.from }}"
+    comment: "{{ item.comment }}"
+  loop: "{{ ufw_extra_rules | default([]) }}"
+
+- name: UFW - default deny incoming
+  community.general.ufw:
+    direction: incoming
+    default: deny
+
+- name: UFW - default allow outgoing
+  community.general.ufw:
+    direction: outgoing
+    default: allow
+
+- name: UFW - enable firewall
+  community.general.ufw:
+    state: enabled

@@ -1,0 +1,5 @@
+---
+# DB only talks to the web server: SSH (bastion hop) and MongoDB.
+ufw_ssh_from: "{{ web_private_ip }}"
+ufw_extra_rules:
+  - { port: "27017", proto: "tcp", from: "{{ web_private_ip }}", comment: "MongoDB from web server" }
